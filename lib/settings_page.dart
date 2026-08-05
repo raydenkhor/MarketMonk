@@ -7,6 +7,7 @@ import 'package:intl/intl.dart';
 import 'package:market_monk/accounts_page.dart';
 import 'package:market_monk/whats_new.dart';
 import 'package:market_monk/csv_import.dart';
+import 'package:market_monk/image_import.dart';
 import 'package:market_monk/database.dart';
 import 'package:market_monk/main.dart';
 import 'package:market_monk/settings_state.dart';
@@ -192,6 +193,53 @@ class _SettingsPageState extends State<SettingsPage> {
     if (!context.mounted) return;
     context.read<SettingsState>().notifyTradesImported();
     toast(context, 'Imported $tradesCount trades');
+  }
+
+  String get _apiKeySubtitle {
+    if (kMistralApiKey.isNotEmpty) return 'Using built-in key';
+    return 'Not set';
+  }
+
+  Future<void> _editApiKey(BuildContext context) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!context.mounted) return;
+    final current = prefs.getString('mistralApiKey') ?? '';
+    final controller = TextEditingController(text: current);
+    var saved = false;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Mistral API key'),
+        content: TextField(
+          controller: controller,
+          obscureText: true,
+          decoration: const InputDecoration(
+            hintText: 'Paste your Mistral API key',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () {
+              saved = true;
+              Navigator.pop(context);
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (!saved || !context.mounted) return;
+    final value = controller.text.trim();
+    if (value.isEmpty) {
+      await prefs.remove('mistralApiKey');
+    } else {
+      await prefs.setString('mistralApiKey', value);
+    }
+    setState(() {});
   }
 
   Future<void> _showCurrencyPicker(
@@ -474,6 +522,25 @@ class _SettingsPageState extends State<SettingsPage> {
               leading: const Icon(Icons.table_chart),
               title: const Text('Import CSV'),
               onTap: () => _importCsv(context),
+            ),
+          ),
+          Tooltip(
+            message:
+                'Import holdings from a screenshot of your brokerage account',
+            child: ListTile(
+              leading: const Icon(Icons.image_search),
+              title: const Text('Import from image'),
+              onTap: () => importHoldingsFromImage(context),
+            ),
+          ),
+          Tooltip(
+            message:
+                'API key used to read holdings images (stored on this device only)',
+            child: ListTile(
+              leading: const Icon(Icons.key),
+              title: const Text('Mistral API key'),
+              subtitle: Text(_apiKeySubtitle),
+              onTap: () => _editApiKey(context),
             ),
           ),
           Tooltip(

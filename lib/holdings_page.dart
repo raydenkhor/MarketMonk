@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:market_monk/bottom_nav.dart';
 import 'package:market_monk/database.dart';
 import 'package:market_monk/edit_ticker_page.dart';
+import 'package:market_monk/image_import.dart';
 import 'package:market_monk/main.dart';
 import 'package:market_monk/settings_page.dart';
 import 'package:market_monk/trade_history_page.dart';
@@ -229,6 +230,13 @@ class HoldingsPageState extends State<HoldingsPage>
             ),
           ),
         ] else ...[
+          PopupMenuItem(
+            onTap: () => importHoldingsFromImage(context),
+            child: const ListTile(
+              leading: Icon(Icons.image_search),
+              title: Text('Import from image'),
+            ),
+          ),
           PopupMenuItem(
             child: ListTile(
               leading: const Icon(Icons.settings),
