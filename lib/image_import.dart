@@ -80,8 +80,9 @@ Future<void> importHoldingsFromImage(BuildContext context) async {
   );
 
   List<ImageHolding> holdings;
+  final skipped = <String>[];
   try {
-    holdings = await parseHoldingsImage(path);
+    holdings = await parseHoldingsImage(path, skipped: skipped);
   } on HoldingsImageParseException catch (e) {
     if (context.mounted) Navigator.pop(context);
     if (context.mounted) toast(context, e.message);
@@ -144,6 +145,24 @@ Future<void> importHoldingsFromImage(BuildContext context) async {
                   style: const TextStyle(fontStyle: FontStyle.italic),
                 ),
               ),
+            if (skipped.isNotEmpty) ...[
+              const Divider(),
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Text(
+                  'Skipped ${skipped.length} non-stock row'
+                  '${skipped.length == 1 ? '' : 's'} (options, shorts, '
+                  'unknown symbols):',
+                  style: const TextStyle(fontStyle: FontStyle.italic),
+                ),
+              ),
+              ...skipped.take(5).map(
+                    (s) => Padding(
+                      padding: const EdgeInsets.only(left: 8, bottom: 2),
+                      child: Text(s, style: const TextStyle(fontSize: 12)),
+                    ),
+                  ),
+            ],
           ],
         ),
       ),
@@ -176,10 +195,14 @@ Future<void> importHoldingsFromImage(BuildContext context) async {
 String _fmtQty(double q) => q % 1 == 0 ? q.toInt().toString() : q.toString();
 
 /// OCRs the image at [imagePath] and returns the parsed holdings.
-Future<List<ImageHolding>> parseHoldingsImage(String imagePath) async {
+/// Unimportable rows (options, shorts) are appended to [skipped].
+Future<List<ImageHolding>> parseHoldingsImage(
+  String imagePath, {
+  List<String>? skipped,
+}) async {
   final apiKey = await _resolveApiKey();
   final markdown = await _ocrMarkdown(imagePath, apiKey);
-  return parseHoldingsMarkdown(markdown);
+  return parseHoldingsMarkdown(markdown, skipped: skipped);
 }
 
 Future<String> _ocrMarkdown(String imagePath, String apiKey) async {
@@ -238,9 +261,17 @@ Future<String> _ocrMarkdown(String imagePath, String apiKey) async {
 ///
 /// Handles two shapes: markdown tables (`| AAPL | Apple Inc. | 10 | ... |`)
 /// and plain token lines (`AAPL Apple Inc. 10 212.50`). Rows for the same
-/// symbol are merged by summing quantities.
-List<ImageHolding> parseHoldingsMarkdown(String markdown) {
+/// symbol are merged by summing quantities. Rows that are deliberately not
+/// imported (options, short positions, unrecognized symbols) are appended to
+/// [skipped] as human-readable descriptions when provided.
+List<ImageHolding> parseHoldingsMarkdown(
+  String markdown, {
+  List<String>? skipped,
+}) {
   final bySymbol = <String, _HoldingAccum>{};
+  // Parsing is stateless per call: a stale header from a previous import
+  // would mis-map the first rows of a table whose header OCR missed.
+  _currentHeader = null;
 
   for (final rawLine in markdown.split('\n')) {
     final line = rawLine.trim();
@@ -261,9 +292,9 @@ List<ImageHolding> parseHoldingsMarkdown(String markdown) {
         _currentHeader = headerIndices;
         continue;
       }
-      _ingestRow(bySymbol, cells, _currentHeader);
+      _ingestRow(bySymbol, cells, _currentHeader, skipped);
     } else {
-      _parsePlainLine(bySymbol, line);
+      _parsePlainLine(bySymbol, line, skipped);
     }
   }
 
@@ -337,6 +368,7 @@ void _ingestRow(
   Map<String, _HoldingAccum> bySymbol,
   List<String> cells,
   _HeaderIndices? header,
+  List<String>? skipped,
 ) {
   String? symbol;
   String name = '';
@@ -371,7 +403,30 @@ void _ingestRow(
   }
   // The header-column cell can yield an empty string (e.g. a ">" expander);
   // without a valid ticker the row must be discarded, not merged under "".
-  if (symbol == null || !_isTicker(symbol)) return;
+  if (symbol == null || !_isTicker(symbol)) {
+    // Only surface rows that look like data (contain a number) — filters,
+    // captions and other chrome would otherwise be reported as "skipped".
+    final hasNumeric = cells.any((c) => _parseNumber(c) != null);
+    if (hasNumeric && skipped != null) {
+      final label = cells.firstWhere(
+        (c) => RegExp(r'[a-zA-Z]').hasMatch(c),
+        orElse: () => cells.first,
+      );
+      // Pager/caption rows ("Viewing 10 of 10 positions") are chrome, not
+      // skipped holdings.
+      final isFooter = RegExp(
+        r'^(viewing|showing|displaying|page|rows?|items?|records?)\b',
+        caseSensitive: false,
+      ).hasMatch(label);
+      if (!isFooter) {
+        skipped.add(
+          '${label.length > 48 ? label.substring(0, 48) : label} — option or '
+          'unrecognized symbol',
+        );
+      }
+    }
+    return;
+  }
 
   int? shifted(int? idx) =>
       idx != null && idx + offset < cells.length ? idx + offset : null;
@@ -443,7 +498,16 @@ void _ingestRow(
     }
   }
 
-  if (quantity == null || quantity <= 0) return;
+  if (quantity == null || quantity <= 0) {
+    if (skipped != null) {
+      if (quantity != null && quantity < 0) {
+        skipped.add('$symbol — short position (qty ${_fmtQty(quantity)})');
+      } else {
+        skipped.add('$symbol — no positive quantity found');
+      }
+    }
+    return;
+  }
 
   final acc = bySymbol.putIfAbsent(
     symbol,
@@ -454,7 +518,11 @@ void _ingestRow(
   acc.price ??= price;
 }
 
-void _parsePlainLine(Map<String, _HoldingAccum> bySymbol, String line) {
+void _parsePlainLine(
+  Map<String, _HoldingAccum> bySymbol,
+  String line,
+  List<String>? skipped,
+) {
   final tokens = line.split(RegExp(r'\s+'));
   int? symbolIdx;
   for (var i = 0; i < tokens.length; i++) {
@@ -491,7 +559,16 @@ void _parsePlainLine(Map<String, _HoldingAccum> bySymbol, String line) {
       nameParts.add(t);
     }
   }
-  if (quantity == null || quantity <= 0) return;
+  if (quantity == null || quantity <= 0) {
+    if (skipped != null) {
+      skipped.add(
+        quantity != null && quantity < 0
+            ? '$symbol — short position (qty ${_fmtQty(quantity)})'
+            : '$symbol — no positive quantity found',
+      );
+    }
+    return;
+  }
 
   final acc = bySymbol.putIfAbsent(
     symbol,

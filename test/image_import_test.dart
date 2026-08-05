@@ -179,9 +179,9 @@ Transfer money
 |  > | ZS ⓘ | Trade | 153.77 | 2.14 | 1.41% | 30 | 140.8933 | 64.20 | 386.30 | 9.14% | 4,613.10 |  |   |
 |  Viewing 10 of 10 positions  |   |   |   |   |   |   |   |   |   |   |   |   |   |
 ''';
-        final holdings = parseHoldingsMarkdown(markdown);
+        final skipped = <String>[];
+        final holdings = parseHoldingsMarkdown(markdown, skipped: skipped);
         expect(holdings, hasLength(9));
-
         final bySymbol = {for (final h in holdings) h.symbol: h};
         expect(bySymbol['BGC']!.quantity, 600.0);
         expect(bySymbol['BGC']!.price, 11.77);
@@ -202,8 +202,11 @@ Transfer money
         expect(bySymbol['ZS']!.quantity, 30.0);
         expect(bySymbol['ZS']!.price, 153.77);
 
-        // The short BGC call option must not be imported as a holding.
+        // The short BGC call option must not be imported as a holding, and
+        // it must be surfaced as skipped so the user knows it was ignored.
         expect(holdings.where((h) => h.symbol == 'BGC'), hasLength(1));
+        expect(skipped, hasLength(1));
+        expect(skipped.single, contains('BGC ⓘ Aug 21'));
       },
     );
   });
