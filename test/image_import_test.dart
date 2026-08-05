@@ -183,24 +183,26 @@ Transfer money
         final holdings = parseHoldingsMarkdown(markdown, skipped: skipped);
         expect(holdings, hasLength(9));
         final bySymbol = {for (final h in holdings) h.symbol: h};
+        // Prices come from the "Price Paid" (cost basis) column, not "Last
+        // Price", so P/L is computed against what was actually paid.
         expect(bySymbol['BGC']!.quantity, 600.0);
-        expect(bySymbol['BGC']!.price, 11.77);
+        expect(bySymbol['BGC']!.price, 10.4641);
         expect(bySymbol['CRMD']!.quantity, 200.0);
-        expect(bySymbol['CRMD']!.price, 7.19);
+        expect(bySymbol['CRMD']!.price, 10.8969);
         expect(bySymbol['DKNG']!.quantity, 100.0);
-        expect(bySymbol['DKNG']!.price, 24.55);
+        expect(bySymbol['DKNG']!.price, 35.6655);
         expect(bySymbol['GRAB']!.quantity, 2000.0);
-        expect(bySymbol['GRAB']!.price, 3.35);
+        expect(bySymbol['GRAB']!.price, 6.2028);
         expect(bySymbol['META']!.quantity, 10.0);
-        expect(bySymbol['META']!.price, 585.61);
+        expect(bySymbol['META']!.price, 723.014);
         expect(bySymbol['MSFT']!.quantity, 10.0);
-        expect(bySymbol['MSFT']!.price, 390.54);
+        expect(bySymbol['MSFT']!.price, 401.61);
         expect(bySymbol['NOW']!.quantity, 20.0);
-        expect(bySymbol['NOW']!.price, 115.76);
+        expect(bySymbol['NOW']!.price, 99.1475);
         expect(bySymbol['TSLA']!.quantity, 40.0);
-        expect(bySymbol['TSLA']!.price, 298.32);
+        expect(bySymbol['TSLA']!.price, 19.44);
         expect(bySymbol['ZS']!.quantity, 30.0);
-        expect(bySymbol['ZS']!.price, 153.77);
+        expect(bySymbol['ZS']!.price, 140.8933);
 
         // The short BGC call option must not be imported as a holding, and
         // it must be surfaced as skipped so the user knows it was ignored.

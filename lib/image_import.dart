@@ -112,6 +112,20 @@ Future<void> importHoldingsFromImage(BuildContext context) async {
   }
 
   final unknownCount = holdings.where((h) => h.priceMissing).length;
+
+  // Detect symbols that already have trades so a re-import of the same
+  // screenshot doesn't silently double every position.
+  final alreadyHeld = <String>[];
+  try {
+    final trades = await db.trades.select().get();
+    final held = trades.map((t) => t.symbol).toSet();
+    alreadyHeld.addAll(
+      holdings.where((h) => held.contains(h.symbol)).map((h) => h.symbol),
+    );
+  } catch (_) {
+    // Best effort — the import itself is still safe.
+  }
+
   if (!context.mounted) return;
 
   var confirmed = false;
@@ -162,6 +176,20 @@ Future<void> importHoldingsFromImage(BuildContext context) async {
                       child: Text(s, style: const TextStyle(fontSize: 12)),
                     ),
                   ),
+            ],
+            if (alreadyHeld.isNotEmpty) ...[
+              const Divider(),
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Text(
+                  '${alreadyHeld.length} of these symbols already have '
+                  'trades: ${alreadyHeld.take(5).join(', ')}'
+                  '${alreadyHeld.length > 5 ? ', …' : ''} — importing will '
+                  'ADD to the existing quantities. Cancel to avoid '
+                  'duplicates.',
+                  style: const TextStyle(fontStyle: FontStyle.italic),
+                ),
+              ),
             ],
           ],
         ),
@@ -318,14 +346,26 @@ _HeaderIndices? _currentHeader;
 class _HeaderIndices {
   final int? symbol;
   final int? quantity;
+
+  /// Cost-basis column ("Price Paid", "Avg Cost") — preferred for the buy
+  /// price so P/L is computed against what was actually paid.
+  final int? cost;
+
+  /// Current-price column ("Last Price") — fallback when no cost column.
   final int? price;
   final int? name;
-  _HeaderIndices({this.symbol, this.quantity, this.price, this.name});
+  _HeaderIndices({
+    this.symbol,
+    this.quantity,
+    this.cost,
+    this.price,
+    this.name,
+  });
 }
 
 _HeaderIndices? _headerIndices(List<String> cells) {
   if (cells.length < 2) return null;
-  int? symbol, quantity, price, name;
+  int? symbol, quantity, cost, price, name;
   for (var i = 0; i < cells.length; i++) {
     // OCR apps attach UI glyphs to header text ("Symbol ▲", "Qty #",
     // "Last Price $"). Strip everything except letters/digits/spaces so
@@ -343,10 +383,9 @@ _HeaderIndices? _headerIndices(List<String> cells) {
         label == 'position' ||
         label == 'size') {
       quantity ??= i;
-    } else if (label.contains('price') ||
-        label == 'nav' ||
-        label.contains('cost') ||
-        label == 'last') {
+    } else if (label.contains('price paid') || label.contains('cost')) {
+      cost ??= i;
+    } else if (label.contains('price') || label == 'nav' || label == 'last') {
       price ??= i;
     } else if (label == 'name' ||
         label == 'description' ||
@@ -359,6 +398,7 @@ _HeaderIndices? _headerIndices(List<String> cells) {
   return _HeaderIndices(
     symbol: symbol,
     quantity: quantity,
+    cost: cost,
     price: price,
     name: name,
   );
@@ -377,6 +417,7 @@ void _ingestRow(
 
   final symbolIdx = header?.symbol;
   final quantityIdx = header?.quantity;
+  final costIdx = header?.cost;
   final priceIdx = header?.price;
   final nameIdx = header?.name;
 
@@ -453,8 +494,15 @@ void _ingestRow(
     }
   }
 
+  final cIdx = shifted(costIdx);
   final pIdx = shifted(priceIdx);
-  if (pIdx != null && !cells[pIdx].contains('%')) {
+  // Prefer the cost-basis column ("Price Paid" / "Avg Cost") — that is the
+  // price the position was actually bought at. Fall back to the current
+  // price column only when the screenshot has no cost column at all.
+  if (cIdx != null && !cells[cIdx].contains('%')) {
+    price = _parseNumber(cells[cIdx]);
+  }
+  if (price == null && pIdx != null && !cells[pIdx].contains('%')) {
     price = _parseNumber(cells[pIdx]);
   }
   final nIdx = shifted(nameIdx);
