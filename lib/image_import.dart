@@ -296,7 +296,11 @@ _HeaderIndices? _headerIndices(List<String> cells) {
   if (cells.length < 2) return null;
   int? symbol, quantity, price, name;
   for (var i = 0; i < cells.length; i++) {
-    final label = cells[i].toLowerCase();
+    // OCR apps attach UI glyphs to header text ("Symbol ▲", "Qty #",
+    // "Last Price $"). Strip everything except letters/digits/spaces so
+    // those headers still match.
+    final label =
+        cells[i].toLowerCase().replaceAll(RegExp(r'[^a-z0-9 ]'), '').trim();
     if (label == 'symbol' || label == 'ticker' || label == 'code') {
       symbol ??= i;
     } else if (label == 'qty' ||
@@ -344,36 +348,70 @@ void _ingestRow(
   final priceIdx = header?.price;
   final nameIdx = header?.name;
 
+  // OCR tables sometimes gain a leading cell versus the header (e.g. a ">"
+  // expander before the symbol). Locate the symbol first, then shift every
+  // mapped column by the same offset so quantity/price stay aligned.
+  var offset = 0;
   if (symbolIdx != null && symbolIdx < cells.length) {
     symbol = _cleanSymbol(cells[symbolIdx]);
   }
   if (symbol == null || !_isTicker(symbol)) {
-    for (final c in cells) {
-      final s = _cleanSymbol(c);
-      // Heuristic matches only require uppercase tokens (OCR tables render
-      // tickers in caps; prose like "No" or "At" is almost always mixed case).
-      if (c == c.toUpperCase() && _isTicker(s)) {
-        symbol = s;
+    for (var i = symbolIdx ?? 0; i < cells.length; i++) {
+      final c = cells[i];
+      // Heuristic matches only require uppercase ASCII letters (OCR tables
+      // render tickers in caps; prose like "No" or "At" is almost always
+      // mixed case). Cannot use c == c.toUpperCase(): circled glyphs such as
+      // "ⓘ" case-map to "Ⓘ", breaking the comparison for every row.
+      if (_allCaps(c) && _isTicker(_cleanSymbol(c))) {
+        symbol = _cleanSymbol(c);
+        offset = symbolIdx == null ? 0 : i - symbolIdx;
         break;
       }
     }
   }
-  if (symbol == null) return;
+  // The header-column cell can yield an empty string (e.g. a ">" expander);
+  // without a valid ticker the row must be discarded, not merged under "".
+  if (symbol == null || !_isTicker(symbol)) return;
 
-  if (quantityIdx != null && quantityIdx < cells.length) {
-    quantity = _parseNumber(cells[quantityIdx]);
+  int? shifted(int? idx) =>
+      idx != null && idx + offset < cells.length ? idx + offset : null;
+
+  final qtyIdx = shifted(quantityIdx);
+  if (qtyIdx != null && !cells[qtyIdx].contains('%')) {
+    quantity = _parseNumber(cells[qtyIdx]);
   }
-  if (priceIdx != null && priceIdx < cells.length) {
-    price = _parseNumber(cells[priceIdx]);
+  // The mapped qty cell can be off by one as well; probe its neighbors
+  // before falling back to the free-form scan below.
+  if (quantity == null || quantity <= 0) {
+    for (final probe in [
+      qtyIdx == null ? null : qtyIdx + 1,
+      qtyIdx == null || qtyIdx == 0 ? null : qtyIdx - 1,
+    ]) {
+      if (probe == null || probe >= cells.length) continue;
+      final cell = cells[probe];
+      if (cell.contains('%')) continue;
+      final v = _parseNumber(cell);
+      if (v != null && v > 0) {
+        quantity = v;
+        break;
+      }
+    }
   }
-  if (nameIdx != null && nameIdx < cells.length) {
-    name = cells[nameIdx];
+
+  final pIdx = shifted(priceIdx);
+  if (pIdx != null && !cells[pIdx].contains('%')) {
+    price = _parseNumber(cells[pIdx]);
+  }
+  final nIdx = shifted(nameIdx);
+  if (nIdx != null) {
+    name = cells[nIdx];
   }
 
   if (quantity == null) {
     for (var i = 0; i < cells.length; i++) {
-      if (i == priceIdx) continue;
+      if (i == pIdx) continue;
       final cell = cells[i];
+      if (cell.contains('%')) continue;
       if (RegExp(r'^[€£$¥]').hasMatch(cell)) continue;
       final v = _parseNumber(cell);
       if (v != null) {
@@ -423,7 +461,7 @@ void _parsePlainLine(Map<String, _HoldingAccum> bySymbol, String line) {
     final token = tokens[i];
     // Tickers appear in caps in holdings screenshots; lowercase prose words
     // ("no", "at", "of") are never valid symbols.
-    if (token == token.toUpperCase() && _isTicker(_cleanSymbol(token))) {
+    if (_allCaps(token) && _isTicker(_cleanSymbol(token))) {
       symbolIdx = i;
       break;
     }
@@ -618,6 +656,9 @@ const Set<String> _headerWords = {
 
 String _cleanSymbol(String raw) {
   var s = raw.trim().toUpperCase().replaceAll(RegExp(r'\s+'), '');
+  // OCR attaches UI glyphs to symbols ("BGC ⓘ", "BRK.B ⓘ"). Strip
+  // everything that cannot be part of a ticker before exchange handling.
+  s = s.replaceAll(RegExp(r'[^A-Z0-9.\-]'), '');
   final exchangeMatch =
       RegExp(r'^([A-Z][A-Z0-9.]{0,9})\.([A-Z]{1,3})$').firstMatch(s);
   if (exchangeMatch != null &&
@@ -635,9 +676,19 @@ bool _isTicker(String s) {
   return RegExp(r'^[A-Z][A-Z0-9.\-]{0,9}$').hasMatch(s);
 }
 
+/// True when every ASCII letter in [s] is uppercase. The cell may still
+/// carry digits and UI glyphs (">", "ⓘ"); those are ignored.
+bool _allCaps(String s) {
+  final letters =
+      RegExp(r'[a-zA-Z]').allMatches(s).map((m) => m.group(0)!).toList();
+  return letters.isNotEmpty && letters.every((ch) => ch == ch.toUpperCase());
+}
+
 double? _parseNumber(String raw) {
-  final m = RegExp(r'-?\d{1,3}(,\d{3})*(\.\d+)?|(\d+\.\d+)|(\d+)')
-      .firstMatch(raw.trim());
+  // Up to 9 integer digits so comma-less four+ digit values ("2000") parse
+  // whole instead of truncating to the first three digits.
+  final m =
+      RegExp(r'-?\d{1,9}(,\d{3})*(\.\d+)?|\d+\.\d+|\d+').firstMatch(raw.trim());
   if (m == null) return null;
   return double.tryParse(m.group(0)!.replaceAll(',', ''));
 }
